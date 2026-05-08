@@ -46,28 +46,50 @@ App available at: `http://localhost:3000`
 | Max Supply == Total Supply | Both non-null, float tolerance of 1 | ✅ Applied |
 | FDV | < $100,000,000 | ✅ Applied |
 | 24h Trading Volume | > $50,000 | ✅ Applied |
-| Preview Listing | == `true` | ⚠️ See note below |
-| TVL | > $50,000 | ⚠️ See note below |
+| TVL | > $50,000 | ⚠️ Implemented, disabled on free tier — see note |
+| Preview Listing | == `true` | ⚠️ Spec contradiction — see note |
 
 ---
 
 ## Frontend Features
 
 - **Search** — partial match on name or ticker symbol (e.g. `eth` → Ethereum)
-- **FDV filter** — user-defined upper bound in millions USD (applied client-side on top of backend data)
-- **Sort** — by Market Cap or 24h Volume, ascending or descending, toggled by clicking column headers
+- **FDV filter** — user-defined upper bound in millions USD (applied client-side)
+- **Sort** — by Market Cap or 24h Volume, ascending or descending
 
 ---
 
 ## Assumptions & Limitations
 
-### ⚠️ The `preview_listing` filter is a spec contradiction
+### ⚠️ TVL filter — implemented but disabled on free tier
 
-After researching the CoinGecko API and documentation, I discovered that this filter is internally contradictory with the rest of the spec.
+TVL is not returned by `/coins/markets`. It requires a separate call to `/coins/{id}` per coin.
 
-CoinGecko defines a **Preview Listing** as a token that has been submitted but has not yet had its Token Generation Event (TGE) — meaning it is pre-launch, not yet trading, and has no price or market data.
+The implementation is complete in `main.py` (`fetch_tvl()` function + enrichment loop) and can be enabled by setting:
 
-This directly contradicts the other filters in the spec:
+```python
+ENABLE_TVL_ENRICHMENT = True  # top of main.py
+```
+
+However, on the free CoinGecko tier, `/coins/{id}` calls trigger 429 rate-limit errors even with multi-second delays between requests. The free tier enforces a strict ~30 req/min cap shared across all endpoint types — fetching 2 pages of market data already uses a significant portion of that budget.
+
+**With a Pro API key** this works cleanly:
+- Update `COINGECKO_BASE` to `https://pro-api.coingecko.com/api/v3`
+- Add `"x-cg-pro-api-key": "YOUR_KEY"` to `HEADERS`
+- Set `ENABLE_TVL_ENRICHMENT = True`
+- The enrichment only runs on the ~20 coins that passed the other filters, so it's just ~20 additional requests — well within Pro rate limits
+
+**Alternative (no Pro key needed):** DeFiLlama offers a free TVL API with no rate limits, cross-referenceable by contract address.
+
+---
+
+### ⚠️ `preview_listing` filter — spec contradiction
+
+After researching the CoinGecko API and documentation, this filter is internally contradictory with the rest of the spec.
+
+CoinGecko defines a **Preview Listing** as a token that has been submitted but has not yet had its Token Generation Event (TGE) — pre-launch, not yet trading, no price or market data.
+
+This directly contradicts the other filters:
 
 | Filter | Implication |
 |---|---|
@@ -76,46 +98,32 @@ This directly contradicts the other filters in the spec:
 | `volume > $50k` | Actively trading |
 | `TVL > $50k` | Actively trading |
 
-**No coin can satisfy both conditions simultaneously.** Applying `preview_listing == true` alongside the market activity filters would always return 0 results.
+No coin can satisfy both simultaneously. Additionally, the `preview_listing` boolean does not appear in the free-tier `/coins/markets` response at all — it only exists in `/coins/{id}` or via Pro endpoints.
 
-Additionally, the `preview_listing` boolean does not appear in the free-tier `/coins/markets` response at all — it only exists in the detailed `/coins/{id}` endpoint or via Pro-tier endpoints.
+**Decision:** Filter disabled with a clear comment in the code. All other filters are applied correctly. The ~20 coins returned are genuinely filtered, actively-trading low-cap coins.
 
-**Decision:** The filter is disabled with a clear comment in the code. All other filters are applied correctly. The current result of ~20 coins reflects genuinely filtered, actively-trading low-cap coins.
-
-**What a Pro API key would unlock:**
-- `/coins/list/new` endpoint to specifically target the latest 200 listings
-- The `preview_listing` boolean on `/coins/{id}` (but calling this per-coin on 500+ coins exhausts the free rate limit of 30 req/min instantly)
-
----
-
-### ⚠️ TVL filter disabled
-
-`/coins/markets` does not return TVL. It is available via `/coins/{id}` but the same rate-limit problem applies — enriching 500 coins individually is not feasible on the free tier.
-
-**What I would do with a Pro key or more time:**
-- Use DeFiLlama's free API as a TVL data source (no rate-limit issues)
-- Fetch TVL for the already-filtered subset only (20 coins instead of 500)
+**With a Pro key:** `/coins/list/new` targets the latest 200 listings directly.
 
 ---
 
 ### Other Notes
 
-**Pagination:** The backend fetches 2 pages × 250 coins = 500 coins with a 3s delay between pages to respect the free-tier rate limit (~30 req/min).
+**Pagination:** 2 pages × 250 coins = 500 coins, with a 3s delay between pages to stay within the free-tier rate limit.
 
-**Caching:** Results are cached in-memory for 2 minutes. Repeated frontend loads are served instantly without re-hitting CoinGecko.
+**Caching:** Results cached in-memory for 2 minutes. Repeated frontend loads are served instantly.
 
-**CORS:** Open (`*`) for local development. In production this would be locked to the frontend's origin.
+**CORS:** Open (`*`) for local development. Lock to frontend origin in production.
 
 ---
 
 ## What I Would Do Next (with more time)
 
-1. **TVL via DeFiLlama** — Free API, no rate limits, cross-reference by contract address
-2. **Preview listings via Pro** — `/coins/list/new` for actual pre-TGE tokens
-3. **Frontend pagination** — Virtual scroll or paginated table for larger datasets
-4. **Better error UX** — Rate-limit countdown, auto-retry with progress indicator
-5. **Unit tests** — Test `passes_filters()` against known coin fixtures
-6. **Docker Compose** — Single `docker compose up` to run both services
+1. **Enable TVL via Pro key or DeFiLlama** — the implementation is already in place, just needs a key or a DeFiLlama integration
+2. **Preview listings via `/coins/list/new`** — Pro endpoint that directly targets pre-TGE coins
+3. **Frontend pagination** — virtual scroll or paginated table for larger datasets
+4. **Better error UX** — rate-limit countdown, auto-retry with progress indicator
+5. **Unit tests** — test `passes_basic_filters()` against known coin fixtures
+6. **Docker Compose** — single `docker compose up` to run both services
 
 ---
 
@@ -123,14 +131,15 @@ Additionally, the `preview_listing` boolean does not appear in the free-tier `/c
 
 | Tool | Usage |
 |---|---|
-| **Claude (claude.ai)** | Generated full backend + frontend scaffold, filter logic, retry/caching strategy, README |
-| **Gemini** | Cross-checked the `preview_listing` API behaviour and confirmed the spec contradiction |
-| **Manual review** | Debugged 502→429→working progression, identified TVL/preview_listing issues, tuned retry delays based on real terminal output |
+| **Claude (claude.ai)** | Generated full backend + frontend scaffold, filter logic, retry/caching strategy, TVL enrichment implementation, README |
+| **Gemini** | Cross-checked the `preview_listing` API behaviour, confirmed the spec contradiction |
+| **Manual review** | Debugged 502 → 429 → working progression in real terminal output, identified free-tier limits on `/coins/{id}`, tuned retry delays, verified final filter results |
 
-**Where AI helped most:** Boilerplate elimination — FastAPI CORS setup, httpx async patterns, React useMemo filter chain. These are patterns I know well but AI produced them in seconds, freeing time to focus on the domain-specific problems.
+**Where AI helped most:** Boilerplate elimination — FastAPI CORS setup, httpx async patterns, React useMemo filter chain, retry logic. These are patterns I know well but AI produced them in seconds, freeing time for the domain-specific problems.
 
 **What I reviewed/corrected manually:**
-- Identified that TVL and `preview_listing` don't exist in the free API — removed both filters rather than silently returning 0 results
-- Caught that firing 4 concurrent CoinGecko requests triggers immediate 429s — switched to sequential with delays
-- Researched the CoinGecko docs to understand what "preview listing" actually means, which revealed the spec contradiction
-- Verified the final 20/500 result is correct behaviour, not a bug
+- Caught that TVL and `preview_listing` don't exist in the free `/coins/markets` response — rather than silently returning 0 results, disabled both with clear documentation
+- Identified that firing 4 concurrent CoinGecko requests triggers immediate 429s — switched to sequential with delays
+- Discovered that `/coins/{id}` TVL lookups also 429 on the free tier even with gaps — gated behind `ENABLE_TVL_ENRICHMENT` flag rather than leaving broken code
+- Researched CoinGecko docs to understand what "preview listing" actually means, which revealed the spec contradiction
+- Verified the ~20 coin result is correct behaviour, not a bug
